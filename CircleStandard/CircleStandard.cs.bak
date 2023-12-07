@@ -1,0 +1,1106 @@
+// 
+//  AutoCAD CAD Standards API Sample
+// 
+//  CircleStandard.cs : CAD Standards Plugin Sample for C#
+// 
+// This sample adds a custom plugin to the CAD Standards
+// Drawing Checker. 
+//
+// The sample plugin tests for a match between the color of a
+// circle in the current drawing, and any of the colors of
+// circles contained in the specified standards (.DWS) files.
+// All the colors of the standard circles are considered as
+// fix candidates of the circle being checked. The recommended
+// fix object will be the standard circle having the nearest
+// radius to the circle being checked.
+
+namespace CircleStandard
+{
+  
+    using AcStMgrCom;
+    using AXDBLib;
+    using MSXML2;
+    using System;
+    using System.Collections.Generic;
+    using System.Runtime.InteropServices;
+
+    /// <summary>
+    /// Defines the <see cref="CircleStandard" />.
+    /// </summary>
+    [ProgId("CircleStandard.CircleStandard")]
+    public class CircleStandard : IAcStPlugin2
+    {
+        // Declare variables
+        /// <summary>
+        /// Defines the m_contexts.
+        /// </summary>
+        private ContextList m_contexts =
+      new ContextList();
+
+        /// <summary>
+        /// Defines the m_mgr.
+        /// </summary>
+        private AcStManager m_mgr;
+
+        /// <summary>
+        /// Defines the m_plugin.
+        /// </summary>
+        private CircleStandard m_plugin;
+
+        /// <summary>
+        /// Defines the m_checkDb.
+        /// </summary>
+        private AcadDatabase m_checkDb;
+
+        /// <summary>
+        /// Defines the m_dwsDb.
+        /// </summary>
+        private AcadDatabase m_dwsDb;
+
+        /// <summary>
+        /// Defines the m_err.
+        /// </summary>
+        private AcStError m_err;
+
+        /// <summary>
+        /// Defines the m_fixArray.
+        /// </summary>
+        private object m_fixArray;
+
+        /// <summary>
+        /// Defines the m_cirCacheArray.
+        /// </summary>
+        private CircleCache[] m_cirCacheArray;
+
+        /// <summary>
+        /// Defines the m_recFixIndex.
+        /// </summary>
+        private int m_recFixIndex;
+
+        /// <summary>
+        /// Defines the m_curIndex.
+        /// </summary>
+        private int m_curIndex;
+
+        /// <summary>
+        /// Defines the m_fixCnt.
+        /// </summary>
+        private int m_fixCnt;
+
+        /// <summary>
+        /// Defines the m_propName.
+        /// </summary>
+        private string m_propName;
+
+        // Initialize
+
+        // Initializes the plugin
+        /// <summary>
+        /// The Initialize.
+        /// </summary>
+        /// <param name="mgr">The mgr<see cref="AcStManager"/>.</param>
+        public void Initialize(AcStManager mgr)
+        {
+            // This is the only member function in which
+            // the interface is passed an IAcStManager interface. 
+
+            // Store pointer to Manager object
+
+            m_mgr = mgr;
+            m_plugin = this;
+        }
+
+        // GetObjectFilter
+
+        // Plugin populates the provided array with class names
+        // of objects that it can check
+        /// <summary>
+        /// The GetObjectFilter.
+        /// </summary>
+        /// <returns>The <see cref="object"/>.</returns>
+        public object GetObjectFilter()
+        {
+            // In this case we're only interested in circles
+
+            string[] filtArray = new string[1];
+            filtArray[0] = "AcDbCircle";
+            return filtArray;
+        }
+
+        // SetupForAudit
+
+        // Sets the context for a plugin to check a drawing
+        /// <summary>
+        /// The SetupForAudit.
+        /// </summary>
+        /// <param name="db">The db<see cref="AcadDatabase"/>.</param>
+        /// <param name="pathName">The pathName<see cref="string"/>.</param>
+        /// <param name="objNameArray">The objNameArray<see cref="object"/>.</param>
+        /// <param name="objPathArray">The objPathArray<see cref="object"/>.</param>
+        /// <param name="objDbArray">The objDbArray<see cref="object"/>.</param>
+        public void SetupForAudit(
+          AcadDatabase db,
+          string pathName,
+          object objNameArray,
+          object objPathArray,
+          object objDbArray)
+        {
+            // This method defines the context in which a plug-in
+            // will operate, specifically the drawing to check and
+            // the DWS files that should be used to check the drawing.
+            // Here we cache our DWS standards definitions and make
+            // an initial cache of circles in the DWG to be checked.
+
+            // NOTE: AcadDatabase objects contained in objDbArray
+            // are ***not*** guaranteed to be valid after this call.
+            // They should not be cached!!!
+
+            if (db != null)
+            {
+                // Cache a pointer to the database
+
+                m_checkDb = db;
+
+                // pDb is the DWG to be checked
+                // Store list of circles in drawing in m_ObjIDArray
+
+                if (m_checkDb != null)
+                {
+                    // Cache list of all circles in the current drawing
+
+                    foreach (AcadObject obj in
+                      m_mgr.get_ModelSpaceProxy(m_checkDb))
+                    {
+                        if (obj.ObjectName == "AcDbCircle")
+                        {
+                            m_contexts.Add(obj.ObjectID, true);
+                        }
+                    }
+                }
+
+                object[] dbArray = (object[])objDbArray;
+                string[] nameArray = (string[])objNameArray;
+                string[] pathArray = (string[])objPathArray;
+
+                int i = 0;
+
+                // Iterate over the DWSes and cache properties (color
+                // and radius) of standard circles 
+
+                for (int iDWS = 0; iDWS < dbArray.Length; iDWS++)
+                {
+                    // Get the DWS database
+
+                    m_dwsDb = (AcadDatabase)dbArray[iDWS];
+                    foreach (AcadCircle stdCircle in
+                      m_mgr.get_ModelSpaceProxy(m_dwsDb))
+                    {
+                        CircleCache cirCache = new CircleCache
+                        {
+                            // CircleCache is utility object for storing
+                            // properties
+
+                            // Cache properties (color and radius) of all
+                            // circles in the DWS database
+
+                            color = stdCircle.color,
+                            radius = stdCircle.Radius,
+                            standardFileName = nameArray[iDWS]
+                        };
+
+                        // pFix contains fix information to be passed back
+                        // to the manager later
+
+                        AcStFix fix = new AcStFix
+                        {
+                            Description = "Color fix",
+                            StandardFileName =
+                          cirCache.standardFileName,
+                            FixObjectName =
+                          "Color: " +
+                          StripAcPrefix(stdCircle.color.ToString())
+                        };
+
+                        if (fix.PropertyCount == 0)
+                        {
+                            fix.PropertyValuePut(
+                              "Color",
+                              stdCircle.color
+                            );
+                        }
+                        cirCache.pFix = fix;
+
+                        Array.Resize<CircleCache>(
+                          ref m_cirCacheArray,
+                          i + 1
+                        );
+                        m_cirCacheArray[i++] = cirCache;
+                    }
+                }
+            }
+        }
+
+        // SetContext
+
+        // Sets the objects to examine when iterating over errors
+        /// <summary>
+        /// The SetContext.
+        /// </summary>
+        /// <param name="objIdArray">The objIdArray<see cref="object"/>.</param>
+        /// <param name="useDb">The useDb<see cref="bool"/>.</param>
+        public void SetContext(object objIdArray, bool useDb)
+        {
+            // If useDb is set to "true" (default), or if
+            // objIdArray is blank, we use the database (we get
+            // all ids for the current drawing). Otherwise, we
+            // set supplied list of objIdArrays as our list.
+
+            m_contexts.SetContext(useDb, objIdArray);
+        }
+
+        // Start
+
+        // Initializes the error iterator mechanism
+        /// <summary>
+        /// The Start.
+        /// </summary>
+        /// <param name="err">The err<see cref="AcStError"/>.</param>
+        public void Start(AcStError err)
+        {
+            // If pStartError is set to an error object, we should
+            // only start checking from that error, not from the
+            // beginning. Mostly we will just go the Next item at
+            // this point...
+
+            if (err != null)
+            {
+                long badId;
+                badId = err.BadObjectId;
+
+                // Find the index for BadObjectId in m_objIDArray
+
+                for (
+                  m_curIndex = 0;
+                  m_curIndex < m_contexts.Count;
+                  m_curIndex++
+                )
+                {
+                    if (m_contexts[m_curIndex] == badId)
+                    {
+                        m_curIndex = (m_curIndex - 1);
+                        Next();
+                    }
+                }
+            }
+            else
+            {
+                // No AcStError object was passed in. Start checking
+                // from the very begining
+
+                m_curIndex = -1;
+                Next();
+            }
+        }
+
+        // Next
+
+        // Finds the next error in the current context
+        /// <summary>
+        /// The Next.
+        /// </summary>
+        public void Next()
+        {
+            m_err = null;
+            if (m_contexts.Count > 0)
+            {
+                // Drawing contains AcDbCircle objects
+
+                AcadCircle circle;
+                bool foundErr;
+
+                if (m_cirCacheArray.Length > 0)
+                {
+                    // If we've not reached end of list, we first
+                    // increment current list index
+
+                    if (m_curIndex < m_contexts.Count - 1)
+                    {
+                        m_curIndex++;
+                        foundErr = false;
+                        while (m_curIndex < m_contexts.Count)
+                        {
+                            // Don't iterate beyond end of list
+                            // Retrieve object using its ObjectId
+
+                            try
+                            {
+                                circle =
+                                  (AcadCircle)m_checkDb.ObjectIdToObject(
+                                    (int)m_contexts[m_curIndex]
+                                  );
+
+                                // Try to find a circle with the same color from
+                                // the cached standard circle (Iterate over cached
+                                // standards)
+
+                                for (
+                                  int iCache = 0;
+                                  iCache < m_cirCacheArray.Length;
+                                  iCache++
+                                )
+                                {
+                                    if (circle.color.CompareTo(
+                                          m_cirCacheArray[iCache].color
+                                        ) != 0)
+                                    {
+                                        // If it doesn't match, we've found a potential
+                                        // error
+
+                                        foundErr = true;
+                                    }
+                                    else
+                                    {
+                                        // If it matches any one standard, then we can
+                                        // stop checking
+
+                                        foundErr = false;
+                                        break;
+                                    }
+                                }
+                                // Check for color differences
+
+                                if (foundErr)
+                                {
+                                    // We found an error so create a local error
+                                    // object
+
+                                    AcStError err = new AcStError
+                                    {
+                                        Description = "Color is non-standard",
+                                        BadObjectId = circle.ObjectID,
+                                        BadObjectName =
+                                      StripAcPrefix(
+                                        circle.color.ToString()
+                                      ),
+                                        Plugin = m_plugin,
+                                        ErrorTypeName = "Color ",
+                                        ResultStatus =
+                                      AcStResultStatus.acStResFlagsNone
+                                    };
+
+                                    if (err.PropertyCount == 0)
+                                    {
+                                        err.PropertyValuePut(
+                                          "Color",
+                                          circle.color
+                                        );
+                                    }
+                                    m_err = err;
+                                    foundErr = false;
+                                    break;
+                                }
+                            }
+                            catch
+                            {
+                            }
+                            m_curIndex++;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Done
+
+        // Returns true if there are no more errors
+        /// <summary>
+        /// The Done.
+        /// </summary>
+        /// <returns>The <see cref="bool"/>.</returns>
+        public bool Done()
+        {
+            return (m_err == null);
+        }
+
+        // GetError -- Returns the current error
+        /// <summary>
+        /// The GetError.
+        /// </summary>
+        /// <returns>The <see cref="AcStError"/>.</returns>
+        public AcStError GetError()
+        {
+            return m_err;
+        }
+
+        // GetAllFixes
+
+        // Returns an array of IAcStFix objects for the given
+        // error (note: The caller is responsible for releasing
+        // the objects in this array)
+        /// <summary>
+        /// The GetAllFixes.
+        /// </summary>
+        /// <param name="err">The err<see cref="AcStError"/>.</param>
+        /// <param name="fixArray">The fixArray<see cref="object"/>.</param>
+        /// <param name="recommendedFixIndex">The recommendedFixIndex<see cref="int"/>.</param>
+        public void GetAllFixes(
+      AcStError err,
+      ref object fixArray,
+      ref int recommendedFixIndex
+    )
+        {
+            if (err != null)
+            {
+                IAcStFix[] arr =
+                  new IAcStFix[m_cirCacheArray.Length];
+                ACAD_COLOR vErrorVal;
+                recommendedFixIndex = -1;
+                m_fixCnt = 0;
+
+                // If we have a cache of fixes, then use that
+
+                if (m_cirCacheArray.Length > 0)
+                {
+                    for (int i = 0; i < m_cirCacheArray.Length; i++)
+                    {
+                        vErrorVal =
+                          (ACAD_COLOR)err.PropertyValueGet("Color");
+                        if (vErrorVal.CompareTo(
+                              m_cirCacheArray[i].color
+                            ) != 0)
+                        {
+                            // If color property of fix matches error, then
+                            // add to list of fixes.
+
+                            arr[i] = m_cirCacheArray[i].pFix;
+                        }
+                    }
+                    fixArray = arr;
+                    m_fixArray = fixArray;
+
+                    // Find the recommendedFixIndex
+                    // (we call this function to retrieve the index -
+                    // we don't need the returned fix object here)
+
+                    GetRecommendedFix(err);
+                    recommendedFixIndex = m_recFixIndex;
+                }
+
+                // Did we find a recommended fix along the way?
+
+                if (recommendedFixIndex == -1)
+                {
+                    // No recomended fix, so set the proper flag on the
+                    // error object
+
+                    err.ResultStatus =
+                      AcStResultStatus.acStResNoRecommendedFix;
+                }
+            }
+        }
+
+        // GetRecommendedFix
+
+        // Retrieves a fix object that describes the
+        // recommended fix
+        /// <summary>
+        /// The GetRecommendedFix.
+        /// </summary>
+        /// <param name="err">The err<see cref="AcStError"/>.</param>
+        /// <returns>The <see cref="AcStFix"/>.</returns>
+        public AcStFix GetRecommendedFix(AcStError err)
+        {
+            AcStFix recFix = new AcStFix();
+
+            if (m_cirCacheArray.Length == 0)
+            {
+                err.ResultStatus =
+                  AcStResultStatus.acStResNoRecommendedFix;
+            }
+            else
+            {
+                // Get the objectId for this error
+
+                long tmpObjID = err.BadObjectId;
+
+                // Retrieve the object to fix from the DWG
+
+                AcadCircle tmpCircle =
+                  (AcadCircle)m_checkDb.ObjectIdToObject(
+                    (int)tmpObjID
+                  );
+                double radiusToBeChecked = tmpCircle.Radius;
+
+                CircleCache cirCache = m_cirCacheArray[0];
+                double diff =
+                  Math.Abs(radiusToBeChecked - cirCache.radius);
+                m_recFixIndex = 0;
+
+                // Attempt to get a fix color from the cached
+                // m_CircleCacheArray
+
+                // Rule: the color of the standard circle with the
+                // nearest radius as the one to be fixed
+
+                for (int i = 0; i < m_cirCacheArray.Length; i++)
+                {
+                    if (diff >
+                        Math.Abs(
+                          radiusToBeChecked - m_cirCacheArray[i].radius
+                        )
+                      )
+                    {
+                        cirCache = m_cirCacheArray[i];
+                        diff =
+                          Math.Abs(radiusToBeChecked - cirCache.radius);
+                        m_recFixIndex = i;
+                    }
+                }
+
+                // Populate properties of the recommended fix object
+
+                recFix.Description = "Color fix";
+                recFix.StandardFileName =
+                  m_cirCacheArray[m_recFixIndex].
+                  standardFileName;
+                recFix.FixObjectName = "Color";
+                if (recFix.PropertyCount == 0)
+                {
+                    recFix.PropertyValuePut(
+                      "Color",
+                      m_cirCacheArray[m_recFixIndex].color
+                    );
+                }
+            }
+            return recFix;
+        }
+
+        // GetPropertyDiffs
+
+        // Populates the provided arrays with the names of
+        // properties that are present in the provided
+        // error and fix objects (used to populate the fix
+        // dialog with 'property name, current value, fix value')
+        /// <summary>
+        /// The GetPropertyDiffs.
+        /// </summary>
+        /// <param name="err">The err<see cref="AcStError"/>.</param>
+        /// <param name="fix">The fix<see cref="AcStFix"/>.</param>
+        /// <param name="objPropNames">The objPropNames<see cref="object"/>.</param>
+        /// <param name="objErrorValues">The objErrorValues<see cref="object"/>.</param>
+        /// <param name="objFixValues">The objFixValues<see cref="object"/>.</param>
+        /// <param name="objFixableStatuses">The objFixableStatuses<see cref="object"/>.</param>
+        public void GetPropertyDiffs(
+      AcStError err,
+      AcStFix fix,
+      ref object objPropNames,
+      ref object objErrorValues,
+      ref object objFixValues,
+      ref object objFixableStatuses)
+        {
+            if (err != null)
+            {
+                string[] propNames = new string[0];
+                string propName = "";
+                string[] errorValues = new string[0];
+                object objErrorVal = new object();
+                string[] fixValues = new string[0];
+                object objFixVal = new object();
+                bool[] fixableStatuses = new bool[0];
+
+                // Iterate error properties
+
+                for (int i = 0; i < err.PropertyCount; i++)
+                {
+                    err.PropertyGetAt(i, ref propName, ref objErrorVal);
+                    m_propName = propName;
+
+                    // Retrieve corresponding Fix property value
+
+                    try
+                    {
+                        fix.PropertyValueGet(propName, ref objFixVal);
+
+                        ACAD_COLOR errVal = (ACAD_COLOR)objErrorVal;
+                        ACAD_COLOR fixVal = (ACAD_COLOR)objFixVal;
+
+                        // Fix object has the same prop, so see if they match
+
+                        if (errVal.CompareTo(fixVal) != 0)
+                        {
+                            // Store error and fix properties in array ready to
+                            // pass back to caller
+
+                            Array.Resize<string>(ref propNames, i + 1);
+                            propNames[i] = propName;
+                            Array.Resize<string>(ref errorValues, i + 1);
+                            errorValues[i] = StripAcPrefix(errVal.ToString());
+                            Array.Resize<string>(ref fixValues, i + 1);
+                            fixValues[i] = StripAcPrefix(fixVal.ToString());
+                            Array.Resize<bool>(ref fixableStatuses, i + 1);
+                            fixableStatuses[i] = true;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                // Initialize the arrays supplied by caller
+
+                objPropNames = propNames;
+                objErrorValues = errorValues;
+                objFixValues = fixValues;
+                objFixableStatuses = fixableStatuses;
+                m_fixCnt++;
+            }
+        }
+
+        // StripAcPrefix
+
+        // Helper function to make color names prettier
+        /// <summary>
+        /// The StripAcPrefix.
+        /// </summary>
+        /// <param name="p">The p<see cref="string"/>.</param>
+        /// <returns>The <see cref="string"/>.</returns>
+        private string StripAcPrefix(string p)
+        {
+            if (p.StartsWith("ac"))
+                return p.Substring(2);
+            else
+                return p;
+        }
+
+        // FixError
+
+        // Takes an error and a fix object and attempts
+        // to fix the error
+        /// <summary>
+        /// The FixError.
+        /// </summary>
+        /// <param name="err">The err<see cref="AcStError"/>.</param>
+        /// <param name="fix">The fix<see cref="AcStFix"/>.</param>
+        /// <param name="failureReason">The failureReason<see cref="string"/>.</param>
+        public void FixError(
+      AcStError err,
+      AcStFix fix,
+      out string failureReason)
+        {
+            failureReason = "";
+            if (err != null)
+            {
+                long badObjID = err.BadObjectId;
+
+                // Retrieve object to fix from DWG
+
+                AcadCircle badObj =
+                  (AcadCircle)m_checkDb.ObjectIdToObject(
+                    (int)badObjID
+                  );
+                if (fix == null)
+                {
+                    // If the fix object is null then attempt to get
+                    // the recommended fix
+
+                    AcStFix tmpFix =
+                      GetRecommendedFix(err);
+
+                    if (tmpFix == null)
+                    {
+                        // Set the error's result status to failed and
+                        // noRecommendedFix
+
+                        err.ResultStatus =
+                          AcStResultStatus.acStResNoRecommendedFix;
+                    }
+                    else
+                    {
+                        fix = tmpFix;
+                    }
+                }
+
+                if (fix != null)
+                {
+                    // Fix the bad circle
+
+                    object sFixVal = new object();
+                    fix.PropertyValueGet(m_propName, ref sFixVal);
+                    ACAD_COLOR fixVal = (ACAD_COLOR)sFixVal;
+                    try
+                    {
+                        badObj.color = fixVal;
+                        err.ResultStatus =
+                          AcStResultStatus.acStResFixed;
+                    }
+                    catch
+                    {
+                        err.ResultStatus =
+                          AcStResultStatus.acStResFixFailed;
+                    }
+                }
+            }
+        }
+
+        // Clear
+
+        // Clears the plugin state and releases any cached
+        // objects
+        /// <summary>
+        /// The Clear.
+        /// </summary>
+        public void Clear()
+        {
+            // Called just before a plugin is released.
+            // Use this function to tidy up after yourself
+
+            m_plugin = null;
+            m_curIndex = -1;
+            m_recFixIndex = -1;
+            m_fixCnt = 0;
+            m_propName = "";
+            m_mgr = null;
+            m_dwsDb = null;
+            m_checkDb = null;
+
+            if (m_err != null)
+            {
+                m_err.Reset();
+                m_err = null;
+            }
+            if (m_cirCacheArray != null)
+            {
+                for (int i = 0; i < m_cirCacheArray.Length; i++)
+                {
+                    if (m_cirCacheArray[i].pFix != null)
+                    {
+                        m_cirCacheArray[i].pFix.Reset();
+                        m_cirCacheArray[i].pFix = null;
+                    }
+                }
+            }
+
+            m_contexts.Clear();
+        }
+
+        // CheckSysvar
+
+        // Checks a system variable
+        /// <summary>
+        /// The CheckSysvar.
+        /// </summary>
+        /// <param name="sysvarName">The sysvarName<see cref="string"/>.</param>
+        /// <param name="getAllFixes">The getAllFixes<see cref="bool"/>.</param>
+        /// <param name="passFail">The passFail<see cref="bool"/>.</param>
+        public void CheckSysvar(
+      string sysvarName,
+      bool getAllFixes,
+      ref bool passFail)
+        {
+        }
+
+        // StampDatabase
+
+        // Returns whether the plugin uses information
+        // from the database for checking
+        /// <summary>
+        /// The StampDatabase.
+        /// </summary>
+        /// <param name="db">The db<see cref="AcadDatabase"/>.</param>
+        /// <param name="stampIt">The stampIt<see cref="bool"/>.</param>
+        public void StampDatabase(
+      AcadDatabase db,
+      ref bool stampIt
+    )
+        {
+            // If the DWS contains circles, we stamp it by
+            // returning stampIt as true, otherwise, returning
+            // stampIt as false
+
+            stampIt = false;
+            foreach (
+              AcadObject obj in
+              m_mgr.get_ModelSpaceProxy(db)
+            )
+            {
+                if (obj.ObjectName == "AcDbCircle")
+                {
+                    stampIt = true;
+                    break;
+                }
+            }
+        }
+
+        // UpdateStatus
+
+        // Updates the result status of the provided error
+        /// <summary>
+        /// The UpdateStatus.
+        /// </summary>
+        /// <param name="err">The err<see cref="AcStError"/>.</param>
+        public void UpdateStatus(AcStError err)
+        {
+        }
+
+        // WritePluginInfo
+
+        // Takes an AcStPluginInfoSection node and creates a
+        // new AcStPluginInfo node below it (note: used by the
+        // Batch Standards Checker to get information about the
+        // plugin)
+        /// <summary>
+        /// The WritePluginInfo.
+        /// </summary>
+        /// <param name="objSectionNode">The objSectionNode<see cref="object"/>.</param>
+        public void WritePluginInfo(object objSectionNode)
+        {
+            IXMLDOMNode section =
+              (IXMLDOMNode)objSectionNode;
+            IXMLDOMElement xml =
+              section.ownerDocument.createElement(
+                "AcStPluginInfo"
+              );
+            IXMLDOMElement info =
+              (IXMLDOMElement)section.appendChild(xml);
+
+            info.setAttribute("PluginName", Name);
+            info.setAttribute("Version", Version);
+            info.setAttribute(
+              "Description",
+              Description
+            );
+            info.setAttribute("Author", Author);
+            info.setAttribute("HRef", HRef);
+            info.setAttribute("DWSName", "");
+            info.setAttribute("Status", "1");
+        }
+
+        // Author
+
+        // Returns the name of the plugin's author
+        /// <summary>
+        /// Gets the Author.
+        /// </summary>
+        public string Author
+        {
+            get { return "Kean Walmsley, Autodesk, Inc."; }
+        }
+
+        // Description
+
+        // Returns a description of what the plugin checks
+        /// <summary>
+        /// Gets the Description.
+        /// </summary>
+        public string Description
+        {
+            get
+            {
+                return
+                  "Checks that circles in a drawing have a color " +
+                  "that matches those of a similar radius in an " +
+                  "associated standards file.";
+            }
+        }
+
+        // HRef
+
+        // Returns a URL where the plugin can be obtained
+        /// <summary>
+        /// Gets the HRef.
+        /// </summary>
+        public string HRef
+        {
+            get
+            {
+                return
+                  "http://blogs.autodesk.com/through-the-interface";
+            }
+        }
+
+        // Icon
+
+        // Returns the HICON property Icon
+        /// <summary>
+        /// Gets the Icon.
+        /// </summary>
+        public int Icon
+        {
+            get { return 1; }
+        }
+
+        // Name
+
+        // Returns the name of the plugin
+        /// <summary>
+        /// Gets the Name.
+        /// </summary>
+        public string Name
+        {
+            get { return "Circle color checker"; }
+        }
+
+        // Version
+
+        // Returns the version of the plugin
+        /// <summary>
+        /// Gets the Version.
+        /// </summary>
+        public string Version
+        {
+            get { return "2.0"; }
+        }
+
+        // CircleCache
+
+        // Caches "standard" circle properties (Color, Radius)
+        // from .DWS files, as well as pointers to the circle's
+        // relevant AcStFix object
+        /// <summary>
+        /// Defines the <see cref="CircleCache" />.
+        /// </summary>
+        private class CircleCache
+        {
+            /// <summary>
+            /// Defines the radius.
+            /// </summary>
+            public double radius;
+
+            /// <summary>
+            /// Defines the color.
+            /// </summary>
+            public ACAD_COLOR color;
+
+            /// <summary>
+            /// Defines the standardFileName.
+            /// </summary>
+            public string standardFileName;
+
+            /// <summary>
+            /// Defines the pFix.
+            /// </summary>
+            public AcStFix pFix;
+        }
+
+        // ContextList
+
+        // Manages list of objects to check - either all in
+        // database, or just those recently added or modified
+        /// <summary>
+        /// Defines the <see cref="ContextList" />.
+        /// </summary>
+        private class ContextList
+        {
+            // List of objects to use when not in database context
+            /// <summary>
+            /// Defines the m_altIdArray.
+            /// </summary>
+            internal List<long> m_altIdArray =
+        new List<long>();
+
+            /// <summary>
+            /// Defines the m_dbIdArray.
+            /// </summary>
+            internal List<long> m_dbIdArray =
+        new List<long>();
+
+            // All objects in database
+            /// <summary>
+            /// Defines the m_useDb.
+            /// </summary>
+            private bool m_useDb;
+
+
+            // Return item from correct context list
+
+            public long this[int index]
+            {
+                get
+                {
+                    if (m_useDb)
+                        return m_dbIdArray[index];
+                    else
+                        return m_altIdArray[index];
+                }
+            }
+            // Number of items in current list
+            /// <summary>
+            /// Gets the Count.
+            /// </summary>
+            public int Count
+            {
+                get
+                {
+                    if (m_useDb)
+                        return m_dbIdArray.Count;
+                    else
+                        return m_altIdArray.Count;
+                }
+            }
+
+            // Flag to determine which context list to return element
+            // from
+            // Select all database or just modified items for checking
+            // (but also add any new ids to database array
+            /// <summary>
+            /// The SetContext.
+            /// </summary>
+            /// <param name="useDb">The useDb<see cref="bool"/>.</param>
+            /// <param name="objContextArray">The objContextArray<see cref="object"/>.</param>
+            public void SetContext(bool useDb, object objContextArray)
+            {
+                if (!useDb && objContextArray != null)
+                {
+                    m_useDb = false;
+                    int[] idArray = (int[])objContextArray;
+                    for (int i = 0; i < idArray.Length; i++)
+                    {
+                        long val = (long)idArray[i];
+                        m_altIdArray.Add(val);
+
+                        // Have to keep database list up to date
+
+                        m_dbIdArray.Add(val);
+                    }
+                }
+                else
+                {
+                    // Clear 
+
+                    m_useDb = true;
+                    m_altIdArray.Clear();
+                }
+            }
+
+            /// <summary>
+            /// The Add.
+            /// </summary>
+            /// <param name="id">The id<see cref="long"/>.</param>
+            /// <param name="useDb">The useDb<see cref="bool"/>.</param>
+            public void Add(long id, bool useDb)
+            {
+                if (useDb)
+                    m_dbIdArray.Add(id);
+                else
+                    m_altIdArray.Add(id);
+            }
+
+            // Clear both lists
+            /// <summary>
+            /// The Clear.
+            /// </summary>
+            public void Clear()
+            {
+                m_altIdArray.Clear();
+                m_dbIdArray.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Gets the Icon.
+        /// </summary>
+        long IAcStPlugin2.Icon => throw new NotImplementedException();
+
+        
+    }
+}
